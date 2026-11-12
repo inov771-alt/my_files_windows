@@ -15,14 +15,13 @@ public sealed class UploadClient : IDisposable
         {
             ConnectTimeout = TimeSpan.FromSeconds(30),
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-            // Как Android/OkHttp: следуем редиректам (307/308 сохраняют метод и тело).
             AllowAutoRedirect = true,
             MaxAutomaticRedirections = 5,
             AutomaticDecompression = DecompressionMethods.All
         };
         _http = new HttpClient(handler)
         {
-            Timeout = Timeout.InfiniteTimeSpan // отмена — кнопкой «Отмена», не таймаутом
+            Timeout = Timeout.InfiniteTimeSpan
         };
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("MyFilesWindows/1.0");
     }
@@ -35,6 +34,7 @@ public sealed class UploadClient : IDisposable
     public async Task<UploadResult> UploadAsync(string url, string filePath, string dir, IProgress<long>? progress, CancellationToken ct, IProgress<string>? stage = null)
     {
         string currentStage = "Подготовка";
+        string requestInfo = "";
         int? statusCode = null;
         string body = "";
         try
@@ -43,13 +43,13 @@ public sealed class UploadClient : IDisposable
             stage?.Report(currentStage);
 
             var content = new StreamingMultipartContent(filePath, "files[]", dir, progress);
-            // HttpRequestMessage владеет контентом и освободит его в своём Dispose().
+            requestInfo = "POST " + url + "\r\n" + content.RequestPreview;
+
             using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
 
             currentStage = "Отправка запроса";
             stage?.Report(currentStage);
 
-            // PostAsync не поддерживает HttpCompletionOption — используем SendAsync.
             using HttpResponseMessage response = await _http
                 .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct)
                 .ConfigureAwait(false);
@@ -62,21 +62,25 @@ public sealed class UploadClient : IDisposable
             currentStage = "Разбор ответа";
             stage?.Report(currentStage);
             UploadResult result = ServerResponse.Parse(statusCode.Value, body);
-            return result with { Stage = result.Success ? "Готово" : "Разбор ответа: отказ" };
+            return result with
+            {
+                Stage = result.Success ? "Готово" : "Разбор ответа: отказ",
+                RequestInfo = requestInfo
+            };
         }
         catch (OperationCanceledException)
         {
-            throw; // отмена пользователем — обрабатывается вызывающим кодом
+            throw;
         }
         catch (Exception ex)
         {
-            // Ничего не скрываем: тип, Message, inner-exception, HTTP-код, этап, тело ответа.
             return new UploadResult(false, DescribeError(ex, statusCode))
             {
                 StatusCode = statusCode,
                 ResponseBody = body,
                 Stage = currentStage,
-                ExceptionText = ex.ToString()
+                ExceptionText = ex.ToString(),
+                RequestInfo = requestInfo
             };
         }
     }
