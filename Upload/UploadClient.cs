@@ -1,8 +1,8 @@
-﻿using System.Net;
+using System.Net;
 
 namespace MyFiles.Upload;
 
-/// <summary>Загрузка файлов на сервер. Каждый файл — отдельный POST-запрос multipart/form-data.</summary>
+/// <summary>Загрузка файлов на сервер. Каждый файл — отдельный POST multipart/form-data.</summary>
 public sealed class UploadClient : IDisposable
 {
     public const string ApiUrl = "https://files.spkmd.ru/index.php?api=upload";
@@ -15,53 +15,87 @@ public sealed class UploadClient : IDisposable
         {
             ConnectTimeout = TimeSpan.FromSeconds(30),
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-            AllowAutoRedirect = false, // редирект POST превращает в GET и теряет тело — лучше показать ошибку
+            // Как Android/OkHttp: следуем редиректам. Для 307/308 метод и тело сохраняются,
+            // контент переотправляется (FileStream открывается заново при каждой сериализации).
+            AllowAutoRedirect = true,
+            MaxAutomaticRedirections = 5,
             AutomaticDecompression = DecompressionMethods.All
         };
         _http = new HttpClient(handler)
         {
-            // Большие файлы могут загружаться часами: общий таймаут отключён,
-            // отмена выполняется кнопкой «Отмена» через CancellationToken.
-            Timeout = Timeout.InfiniteTimeSpan
+            Timeout = Timeout.InfiniteTimeSpan // отмена — кнопкой «Отмена», не таймаутом
         };
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("MyFilesWindows/1.0");
     }
 
-    public Task<UploadResult> UploadAsync(string filePath, string dir, IProgress<long>? progress, CancellationToken ct)
+    public Task<UploadResult> UploadAsync(string filePath, string dir, IProgress<long>? progress, CancellationToken ct, IProgress<string>? stage = null)
     {
-        return UploadAsync(ApiUrl, filePath, dir, progress, ct);
+        return UploadAsync(ApiUrl, filePath, dir, progress, ct, stage);
     }
 
-    public async Task<UploadResult> UploadAsync(string url, string filePath, string dir, IProgress<long>? progress, CancellationToken ct)
+    public async Task<UploadResult> UploadAsync(string url, string filePath, string dir, IProgress<long>? progress, CancellationToken ct, IProgress<string>? stage = null)
     {
+        string currentStage = "Подготовка";
+        int? statusCode = null;
+        string body = "";
         try
         {
+            currentStage = "Подготовка multipart";
+            stage?.Report(currentStage);
             using var content = new StreamingMultipartContent(filePath, "files[]", dir, progress);
-            using HttpResponseMessage response = await _http.PostAsync(url, content, ct).ConfigureAwait(false);
-            string body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            return ServerResponse.Parse((int)response.StatusCode, body);
+
+            currentStage = "Отправка запроса";
+            stage?.Report(currentStage);
+            using HttpResponseMessage response = await _http
+                .PostAsync(url, content, HttpCompletionOption.ResponseHeadersRead, ct)
+                .ConfigureAwait(false);
+
+            statusCode = (int)response.StatusCode;
+            currentStage = "Чтение тела ответа (HTTP " + statusCode + ")";
+            stage?.Report(currentStage);
+            body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+
+            currentStage = "Разбор ответа";
+            stage?.Report(currentStage);
+            UploadResult result = ServerResponse.Parse(statusCode.Value, body);
+            return result with { Stage = result.Success ? "Готово" : "Разбор ответа: отказ" };
         }
         catch (OperationCanceledException)
         {
             throw; // отмена пользователем — обрабатывается вызывающим кодом
         }
-        catch (HttpRequestException ex)
-        {
-            string detail = ex.InnerException?.Message ?? ex.Message;
-            return new UploadResult(false, "Сетевая ошибка: " + detail);
-        }
-        catch (IOException ex)
-        {
-            return new UploadResult(false, "Ошибка чтения файла: " + ex.Message);
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            return new UploadResult(false, "Нет доступа к файлу: " + ex.Message);
-        }
         catch (Exception ex)
         {
-            return new UploadResult(false, "Ошибка: " + ex.Message);
+            // Ничего не скрываем: тип исключения, Message, inner-exception, HTTP-код, этап, тело.
+            return new UploadResult(false, DescribeError(ex, statusCode))
+            {
+                StatusCode = statusCode,
+                ResponseBody = body,
+                Stage = currentStage,
+                ExceptionText = ex.ToString()
+            };
         }
+    }
+
+    private static string DescribeError(Exception ex, int? statusCode)
+    {
+        string kind = ex switch
+        {
+            HttpRequestException => "Сетевая ошибка",
+            IOException => "Ошибка ввода-вывода (файл/поток)",
+            UnauthorizedAccessException => "Нет доступа к файлу",
+            _ => "Ошибка (" + ex.GetType().Name + ")"
+        };
+        string text = kind + ": " + ex.Message;
+        if (ex.InnerException is not null)
+        {
+            text += " → " + ex.InnerException.Message;
+        }
+        if (statusCode.HasValue)
+        {
+            text += " [HTTP " + statusCode.Value + "]";
+        }
+        return text;
     }
 
     public void Dispose()
