@@ -24,6 +24,7 @@ public sealed class UploadItem
     public int? StatusCode { get; set; }
     public string ResponseBody { get; set; } = "";
     public string ExceptionText { get; set; } = "";
+    public string RequestInfo { get; set; } = "";
 
     public int Percent
     {
