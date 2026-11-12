@@ -1,45 +1,47 @@
-name: Build MyFiles Windows
+name: Build
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 8.0.x
 
-      - name: Find project
-        id: project
+      - name: Publish (self-contained, single-file, win-x64)
+        run: >
+          dotnet publish MyFiles.csproj -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true -o publish
+
+      - name: Prepare artifact folder
         shell: pwsh
         run: |
-          $project = Get-ChildItem -Recurse -Filter *.csproj | Select-Object -First 1
-          if (-not $project) {
-            throw "Файл проекта .csproj не найден"
-          }
-          "path=$($project.FullName)" >> $env:GITHUB_OUTPUT
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item publish/MyFiles.exe dist/MyFiles.exe
+          Copy-Item scripts/install_sendto.cmd dist/
+          Copy-Item scripts/install_sendto.ps1 dist/
+          Copy-Item scripts/uninstall_sendto.cmd dist/
+          Copy-Item scripts/uninstall_sendto.ps1 dist/
+          Copy-Item README.md dist/README.md
+          Get-ChildItem dist | Format-Table Name, Length
 
-      - name: Publish
-        run: >
-          dotnet publish "${{ steps.project.outputs.path }}"
-          -c Release
-          -r win-x64
-          --self-contained true
-          -p:PublishSingleFile=true
-          -p:IncludeNativeLibrariesForSelfExtract=true
-          -o ./publish
-
-      - name: Upload EXE
-        uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
         with:
-          name: MyFiles-Windows-x64
-          path: publish/*.exe
+          name: MyFiles-win-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
