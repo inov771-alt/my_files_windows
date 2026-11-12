@@ -15,8 +15,7 @@ public sealed class UploadClient : IDisposable
         {
             ConnectTimeout = TimeSpan.FromSeconds(30),
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-            // Как Android/OkHttp: следуем редиректам. Для 307/308 метод и тело сохраняются,
-            // контент переотправляется (FileStream открывается заново при каждой сериализации).
+            // Как Android/OkHttp: следуем редиректам (307/308 сохраняют метод и тело).
             AllowAutoRedirect = true,
             MaxAutomaticRedirections = 5,
             AutomaticDecompression = DecompressionMethods.All
@@ -42,12 +41,17 @@ public sealed class UploadClient : IDisposable
         {
             currentStage = "Подготовка multipart";
             stage?.Report(currentStage);
-            using var content = new StreamingMultipartContent(filePath, "files[]", dir, progress);
+
+            var content = new StreamingMultipartContent(filePath, "files[]", dir, progress);
+            // HttpRequestMessage владеет контентом и освободит его в своём Dispose().
+            using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
 
             currentStage = "Отправка запроса";
             stage?.Report(currentStage);
+
+            // PostAsync не поддерживает HttpCompletionOption — используем SendAsync.
             using HttpResponseMessage response = await _http
-                .PostAsync(url, content, HttpCompletionOption.ResponseHeadersRead, ct)
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct)
                 .ConfigureAwait(false);
 
             statusCode = (int)response.StatusCode;
@@ -66,7 +70,7 @@ public sealed class UploadClient : IDisposable
         }
         catch (Exception ex)
         {
-            // Ничего не скрываем: тип исключения, Message, inner-exception, HTTP-код, этап, тело.
+            // Ничего не скрываем: тип, Message, inner-exception, HTTP-код, этап, тело ответа.
             return new UploadResult(false, DescribeError(ex, statusCode))
             {
                 StatusCode = statusCode,
