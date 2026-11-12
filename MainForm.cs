@@ -474,16 +474,18 @@ internal sealed class MainForm : Form
         _lv.Columns[0].Width = Math.Max(160, _lv.ClientSize.Width - other - 4);
     }
 
-    private void LvDrawSubItem(object? sender, DrawListViewSubItemEventArgs e)
+        private void LvDrawSubItem(object? sender, DrawListViewSubItemEventArgs e)
     {
-        if (e.ColumnIndex != 2 || e.Item.Tag is not UploadItem item)
+        // e.Item в .NET 8 объявлен как ListViewItem? — обязательна проверка на null.
+        ListViewItem? row = e.Item;
+        if (e.ColumnIndex != 2 || row is null || row.Tag is not UploadItem item)
         {
             e.DrawDefault = true;
             return;
         }
 
         Graphics g = e.Graphics;
-        bool selected = e.Item.Selected;
+        bool selected = row.Selected;
         using (var bg = new SolidBrush(selected ? SystemColors.Highlight : _lv.BackColor))
         {
             g.FillRectangle(bg, e.Bounds);
