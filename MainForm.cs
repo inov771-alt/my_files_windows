@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
+using System.Text;
 using MyFiles.Upload;
 
 namespace MyFiles;
@@ -23,10 +24,12 @@ internal sealed class MainForm : Form
     private readonly Label _lblDir = new() { Text = "Папка на сервере:", AutoSize = true, Margin = new Padding(14, 9, 3, 0) };
     private readonly TextBox _txtDir = new() { Width = 240, Margin = new Padding(3, 6, 3, 3), PlaceholderText = "пусто — корневая папка" };
     private readonly FilesListView _lv = new() { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false, OwnerDraw = true, AllowDrop = true, ShowItemToolTips = true };
+    private readonly SplitContainer _split = new() { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterWidth = 6, Panel1MinSize = 120, Panel2MinSize = 90 };
+    private readonly TextBox _txtDiag = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Font = new Font("Consolas", 9f), BackColor = SystemColors.Window };
     private readonly ProgressBar _overallBar = new() { Dock = DockStyle.Fill, Minimum = 0, Maximum = 1000, Height = 18, Margin = new Padding(3, 6, 3, 2) };
     private readonly Label _lblTotal = new() { AutoSize = true, Margin = new Padding(3, 0, 3, 0), Text = "" };
     private readonly Label _lblStatus = new() { AutoSize = true, Margin = new Padding(3, 2, 3, 0), Text = "Добавьте файлы и нажмите «Загрузить»." };
-    private readonly Label _lblHint = new() { AutoSize = true, ForeColor = Color.Gray, Font = new Font("Segoe UI", 8.25f), Margin = new Padding(3, 2, 3, 0), Text = "Файлы можно перетаскивать в список. Двойной щелчок по строке с ошибкой — подробности." };
+    private readonly Label _lblHint = new() { AutoSize = true, ForeColor = Color.Gray, Font = new Font("Segoe UI", 8.25f), Margin = new Padding(3, 2, 3, 0), Text = "Файлы можно перетаскивать в список. Выберите строку — ниже появится полная диагностика (этап, HTTP, ответ сервера, исключение)." };
     private readonly Button _btnUpload = new() { Text = "Загрузить", Width = 130, Height = 32 };
     private readonly Button _btnCancel = new() { Text = "Отмена", Width = 110, Height = 32, Enabled = false };
 
@@ -35,8 +38,8 @@ internal sealed class MainForm : Form
         Text = "Мои файлы — загрузка на files.spkmd.ru";
         Font = new Font("Segoe UI", 9f);
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(660, 430);
-        Size = new Size(800, 560);
+        MinimumSize = new Size(680, 520);
+        Size = new Size(860, 680);
         KeyPreview = true;
         Padding = new Padding(8);
 
@@ -51,12 +54,22 @@ internal sealed class MainForm : Form
         _lv.DoubleClick += LvDoubleClick;
         _lv.DragEnter += LvDragEnter;
         _lv.DragDrop += LvDragDrop;
+        _lv.SelectedIndexChanged += (_, _) => ShowDiagnosticForSelection();
+
+        // Список сверху, панель диагностики снизу.
+        _split.Panel1.Controls.Add(_lv);
+        var diagLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+        diagLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        diagLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        diagLayout.Controls.Add(new Label { Text = "Диагностика выбранного файла:", AutoSize = true, Margin = new Padding(3, 3, 3, 0) }, 0, 0);
+        diagLayout.Controls.Add(_txtDiag, 0, 1);
+        _split.Panel2.Controls.Add(diagLayout);
 
         var top = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Margin = new Padding(0, 0, 0, 6) };
         top.Controls.AddRange(new Control[] { _btnAdd, _btnClear, _lblDir, _txtDir });
 
         var bottom = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = new Padding(0, 6, 0, 0) };
-        bottom.Controls.Add(_btnCancel);   // при RightToLeft первый элемент — правый
+        bottom.Controls.Add(_btnCancel);
         bottom.Controls.Add(_btnUpload);
 
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7 };
@@ -68,7 +81,7 @@ internal sealed class MainForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.Controls.Add(top, 0, 0);
-        root.Controls.Add(_lv, 0, 1);
+        root.Controls.Add(_split, 0, 1);
         root.Controls.Add(_overallBar, 0, 2);
         root.Controls.Add(_lblTotal, 0, 3);
         root.Controls.Add(_lblStatus, 0, 4);
@@ -82,14 +95,18 @@ internal sealed class MainForm : Form
         _btnCancel.Click += (_, _) => CancelUploads();
         KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape && _uploading) CancelUploads(); };
         FormClosing += OnFormClosing;
-        Shown += (_, _) => { AdjustColumns(); if (_autoStart && HasPending()) _ = RunUploadsAsync(); };
+        Shown += (_, _) =>
+        {
+            AdjustColumns();
+            try { _split.SplitterDistance = Math.Max(_split.Panel1MinSize, _split.Height * 60 / 100); } catch { }
+            if (_autoStart && HasPending()) _ = RunUploadsAsync();
+        };
 
         UpdateButtons();
     }
 
     // ---------- Добавление файлов ----------
 
-    /// <summary>Добавляет файлы (папки раскрываются, без подпапок). Возвращает число добавленных файлов.</summary>
     public int AddPaths(IEnumerable<string> paths)
     {
         var existing = new HashSet<string>(_items.Select(i => i.FullPath), StringComparer.OrdinalIgnoreCase);
@@ -99,23 +116,11 @@ internal sealed class MainForm : Form
             IEnumerable<string> files;
             try
             {
-                if (Directory.Exists(path))
-                {
-                    files = Directory.EnumerateFiles(path).ToList();
-                }
-                else if (File.Exists(path))
-                {
-                    files = new[] { path };
-                }
-                else
-                {
-                    continue;
-                }
+                if (Directory.Exists(path)) { files = Directory.EnumerateFiles(path).ToList(); }
+                else if (File.Exists(path)) { files = new[] { path }; }
+                else { continue; }
             }
-            catch
-            {
-                continue;
-            }
+            catch { continue; }
 
             foreach (string file in files)
             {
@@ -126,14 +131,8 @@ internal sealed class MainForm : Form
                     full = Path.GetFullPath(file);
                     size = new FileInfo(full).Length;
                 }
-                catch
-                {
-                    continue;
-                }
-                if (!existing.Add(full))
-                {
-                    continue;
-                }
+                catch { continue; }
+                if (!existing.Add(full)) { continue; }
                 var item = new UploadItem { FullPath = full, FileName = Path.GetFileName(full), Size = size };
                 var row = new ListViewItem(item.FileName) { Tag = item, ToolTipText = full };
                 row.SubItems.Add(Utils.FormatSize(size));
@@ -158,27 +157,14 @@ internal sealed class MainForm : Form
         _autoStart = true;
     }
 
-    /// <summary>Файлы от повторного запуска программы (Проводник мог разбить выборку на несколько запусков).</summary>
     public void OnExternalArgs(string[] args)
     {
-        if (WindowState == FormWindowState.Minimized)
-        {
-            WindowState = FormWindowState.Normal;
-        }
+        if (WindowState == FormWindowState.Minimized) { WindowState = FormWindowState.Normal; }
         Activate();
         int added = AddPaths(args);
-        if (added == 0)
-        {
-            return;
-        }
-        if (_uploading)
-        {
-            SetStatus("Добавлено в очередь: " + added);
-        }
-        else
-        {
-            _ = RunUploadsAsync();
-        }
+        if (added == 0) { return; }
+        if (_uploading) { SetStatus("Добавлено в очередь: " + added); }
+        else { _ = RunUploadsAsync(); }
     }
 
     private void PickFiles()
@@ -189,10 +175,7 @@ internal sealed class MainForm : Form
             Filter = "Все файлы (*.*)|*.*",
             Multiselect = true
         };
-        if (dialog.ShowDialog(this) == DialogResult.OK)
-        {
-            AddPaths(dialog.FileNames);
-        }
+        if (dialog.ShowDialog(this) == DialogResult.OK) { AddPaths(dialog.FileNames); }
     }
 
     private void ClearList()
@@ -201,6 +184,7 @@ internal sealed class MainForm : Form
         _items.Clear();
         _rows.Clear();
         _lv.Items.Clear();
+        _txtDiag.Text = "";
         _overallBar.Value = 0;
         _lblTotal.Text = "";
         SetStatus("Список очищен. Добавьте файлы и нажмите «Загрузить».");
@@ -209,27 +193,21 @@ internal sealed class MainForm : Form
 
     private void LvDragEnter(object? sender, DragEventArgs e)
     {
-        if (e.Data is not null && e.Data.GetDataPresent(DataFormats.FileDrop))
-        {
-            e.Effect = DragDropEffects.Copy;
-        }
+        if (e.Data is not null && e.Data.GetDataPresent(DataFormats.FileDrop)) { e.Effect = DragDropEffects.Copy; }
     }
 
     private void LvDragDrop(object? sender, DragEventArgs e)
     {
-        if (e.Data is not null && e.Data.GetData(DataFormats.FileDrop) is string[] files)
-        {
-            AddPaths(files);
-        }
+        if (e.Data is not null && e.Data.GetData(DataFormats.FileDrop) is string[] files) { AddPaths(files); }
     }
 
     private void LvDoubleClick(object? sender, EventArgs e)
     {
         if (_lv.SelectedItems.Count == 0) return;
-        if (_lv.SelectedItems[0].Tag is UploadItem item && !string.IsNullOrEmpty(item.Error))
+        if (_lv.SelectedItems[0].Tag is UploadItem item)
         {
-            MessageBox.Show(this, item.FileName + "\n\n" + item.Error, "Ошибка загрузки",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, BuildDiagnostic(item), "Диагностика: " + item.FileName,
+                MessageBoxButtons.OK, item.State == UploadState.Error ? MessageBoxIcon.Error : MessageBoxIcon.Information);
         }
     }
 
@@ -242,12 +220,8 @@ internal sealed class MainForm : Form
 
     private async Task RunUploadsAsync()
     {
-        if (_uploading || !HasPending())
-        {
-            return;
-        }
+        if (_uploading || !HasPending()) { return; }
 
-        // Повторная попытка для ошибок и отменённых; «Готово» пропускается.
         foreach (UploadItem item in _items)
         {
             if (item.State is UploadState.Error or UploadState.Cancelled)
@@ -255,6 +229,10 @@ internal sealed class MainForm : Form
                 item.State = UploadState.Waiting;
                 item.Sent = 0;
                 item.Error = null;
+                item.StatusCode = null;
+                item.ResponseBody = "";
+                item.ExceptionText = "";
+                item.Stage = "";
                 UpdateRow(item);
             }
         }
@@ -277,21 +255,30 @@ internal sealed class MainForm : Form
             while (!_cts.IsCancellationRequested)
             {
                 UploadItem? item = _items.FirstOrDefault(i => i.State == UploadState.Waiting);
-                if (item is null)
-                {
-                    break;
-                }
+                if (item is null) { break; }
 
                 try { item.Size = new FileInfo(item.FullPath).Length; } catch { }
                 item.State = UploadState.Uploading;
                 item.Sent = 0;
+                item.Stage = "Подготовка";
                 UpdateRow(item);
                 SetStatus("Загружается: " + item.FileName);
 
                 var progress = new Progress<long>(sent => OnFileProgress(item, sent));
+                var stageProgress = new Progress<string>(stage =>
+                {
+                    item.Stage = stage;
+                    SetStatus("Загружается: " + item.FileName + " — " + stage);
+                    if (IsSelected(item)) ShowDiagnosticForSelection();
+                });
+
                 try
                 {
-                    UploadResult result = await _client.UploadAsync(item.FullPath, dir, progress, _cts.Token);
+                    UploadResult result = await _client.UploadAsync(item.FullPath, dir, progress, _cts.Token, stageProgress);
+                    item.StatusCode = result.StatusCode;
+                    item.ResponseBody = result.ResponseBody;
+                    item.ExceptionText = result.ExceptionText;
+                    item.Stage = result.Stage;
                     if (result.Success)
                     {
                         item.State = UploadState.Done;
@@ -309,6 +296,7 @@ internal sealed class MainForm : Form
                 catch (OperationCanceledException)
                 {
                     item.State = UploadState.Cancelled;
+                    item.Stage = "Отменено пользователем";
                     cancelled++;
                     UpdateRow(item);
                     break;
@@ -316,11 +304,20 @@ internal sealed class MainForm : Form
                 catch (Exception ex)
                 {
                     item.State = UploadState.Error;
-                    item.Error = ex.Message;
+                    item.Error = "Ошибка (" + ex.GetType().Name + "): " + ex.Message;
+                    item.ExceptionText = ex.ToString();
                     failed++;
                 }
+
                 UpdateRow(item);
                 UpdateOverall();
+                if (item.State == UploadState.Error)
+                {
+                    // Сразу показываем причину, ничего не скрываем.
+                    _rows[item].Selected = true;
+                    _rows[item].EnsureVisible();
+                    ShowDiagnosticForSelection();
+                }
             }
         }
         finally
@@ -334,20 +331,11 @@ internal sealed class MainForm : Form
 
             int queued = _items.Count(i => i.State == UploadState.Waiting);
             string summary = $"Итог: загружено — {done}, ошибок — {failed}, отменено — {cancelled}";
-            if (queued > 0)
-            {
-                summary += $", в очереди — {queued}";
-            }
-            if (failed > 0)
-            {
-                summary += ". Двойной щелчок по ошибке — подробности.";
-            }
+            if (queued > 0) { summary += $", в очереди — {queued}"; }
+            if (failed > 0) { summary += ". Выберите строку с ошибкой — диагностика ниже."; }
             SetStatus(summary);
 
-            if (_closeRequested)
-            {
-                BeginInvoke(new Action(Close));
-            }
+            if (_closeRequested) { BeginInvoke(new Action(Close)); }
         }
     }
 
@@ -364,8 +352,52 @@ internal sealed class MainForm : Form
     {
         if (IsDisposed) return;
         item.Sent = sent;
+        if (sent >= item.Size && item.State == UploadState.Uploading)
+        {
+            item.Stage = "Ожидание ответа сервера";
+            SetStatus("Загружается: " + item.FileName + " — ожидание ответа сервера");
+        }
         UpdateRow(item);
         UpdateOverall();
+    }
+
+    private bool IsSelected(UploadItem item)
+    {
+        return _lv.SelectedItems.Count > 0 && ReferenceEquals(_lv.SelectedItems[0].Tag, item);
+    }
+
+    private void ShowDiagnosticForSelection()
+    {
+        if (_lv.SelectedItems.Count > 0 && _lv.SelectedItems[0].Tag is UploadItem item)
+        {
+            _txtDiag.Text = BuildDiagnostic(item);
+        }
+        else
+        {
+            _txtDiag.Text = "";
+        }
+    }
+
+    private string BuildDiagnostic(UploadItem item)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Файл:       " + item.FileName);
+        sb.AppendLine("Путь:       " + item.FullPath);
+        sb.AppendLine("Размер:     " + Utils.FormatSize(item.Size) + " (" + item.Size + " байт)");
+        sb.AppendLine("Отправлено: " + Utils.FormatSize(item.Sent));
+        sb.AppendLine("Этап:       " + (item.Stage.Length > 0 ? item.Stage : "—"));
+        sb.AppendLine("Статус:     " + StateText(item.State));
+        sb.AppendLine("HTTP код:   " + (item.StatusCode.HasValue ? item.StatusCode.Value.ToString() : "—"));
+        sb.AppendLine();
+        sb.AppendLine("===== ТЕЛО ОТВЕТА СЕРВЕРА =====");
+        sb.AppendLine(item.ResponseBody.Length > 0 ? item.ResponseBody : "(пусто)");
+        sb.AppendLine();
+        sb.AppendLine("===== ИСКЛЮЧЕНИЕ (полностью) =====");
+        sb.AppendLine(item.ExceptionText.Length > 0 ? item.ExceptionText : "(нет)");
+        sb.AppendLine();
+        sb.AppendLine("===== СООБЩЕНИЕ =====");
+        sb.AppendLine(string.IsNullOrEmpty(item.Error) ? "(нет)" : item.Error);
+        return sb.ToString();
     }
 
     // ---------- Отображение ----------
@@ -397,7 +429,7 @@ internal sealed class MainForm : Form
         row.SubItems[3].Text = StateText(item.State);
         row.ForeColor = StateColor(item.State);
         row.ToolTipText = string.IsNullOrEmpty(item.Error) ? item.FullPath : item.Error;
-        _lv.Invalidate(row.Bounds); // перерисовать индикатор прогресса
+        _lv.Invalidate(row.Bounds);
     }
 
     private void UpdateOverall()
@@ -417,17 +449,14 @@ internal sealed class MainForm : Form
                 _speedLastMs = now;
                 _speedLastBytes = sent;
             }
-            if (_speedText.Length > 0)
-            {
-                speed = " · " + _speedText;
-            }
+            if (_speedText.Length > 0) { speed = " · " + _speedText; }
         }
         _lblTotal.Text = total > 0 ? $"Всего: {Utils.FormatSize(sent)} из {Utils.FormatSize(total)}{speed}" : "";
     }
 
     private void UpdateButtons()
     {
-        _btnAdd.Enabled = true;                 // добавление в очередь доступно и во время загрузки
+        _btnAdd.Enabled = true;
         _btnClear.Enabled = !_uploading && _items.Count > 0;
         _btnUpload.Enabled = !_uploading && HasPending();
         _btnCancel.Enabled = _uploading;
@@ -495,20 +524,13 @@ internal sealed class MainForm : Form
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
-        if (!_uploading)
-        {
-            return;
-        }
+        if (!_uploading) { return; }
         DialogResult answer = MessageBox.Show(this,
             "Загрузка ещё не завершена. Отменить загрузку и выйти?",
             "Мои файлы", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-        if (answer == DialogResult.No)
-        {
-            e.Cancel = true;
-            return;
-        }
+        if (answer == DialogResult.No) { e.Cancel = true; return; }
         _closeRequested = true;
-        e.Cancel = true; // окно закроется само, когда загрузка корректно остановится
+        e.Cancel = true;
         _cts?.Cancel();
     }
 
