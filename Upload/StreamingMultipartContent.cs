@@ -1,18 +1,16 @@
 using System.Diagnostics;
 using System.Net;
-using System.Net.Http.Headers;
 using System.Text;
 
 namespace MyFiles.Upload;
 
 /// <summary>
-/// Потоковое тело multipart/form-data для одного файла.
-/// Файл читается с диска порциями по 128 КБ и сразу пишется в сетевой поток:
-/// весь файл НИКОГДА не загружается в оперативную память целиком.
-/// Заголовки части (включая имя файла) формируются вручную в UTF-8 —
-/// кириллические имена передаются «как есть», точно так же, как их отправляют
-/// браузеры и curl, и корректно понимаются PHP на сервере.
-/// Content-Length известен заранее, поэтому HttpClient не буферизует тело.
+/// Потоковое тело multipart/form-data: сначала поле dir, затем один файл (files[]).
+/// Файл читается с диска порциями по 128 КБ и сразу пишется в сеть — целиком в память не попадает.
+/// Content-Length задаётся ЯВНО, чтобы исключить Transfer-Encoding: chunked
+/// (chunked-тело запроса PHP не разбирает, и $_FILES оказывается пустым).
+/// Boundary — простой буквенно-цифровой токен; Content-Type выставляется «сырым» значением,
+/// чтобы HttpClient не переформатировал заголовок. Имена файлов — UTF-8 «как есть».
 /// </summary>
 public sealed class StreamingMultipartContent : HttpContent
 {
@@ -24,32 +22,46 @@ public sealed class StreamingMultipartContent : HttpContent
     private readonly byte[] _epilogue;
     private readonly IProgress<long>? _progress;
 
+    /// <summary>Точные заголовки и обрамление тела — для панели диагностики.</summary>
+    public string RequestPreview { get; }
+
     public StreamingMultipartContent(string filePath, string fieldName, string dir, IProgress<long>? progress)
     {
         _filePath = filePath;
         _progress = progress;
         _fileLength = new FileInfo(filePath).Length; // FileNotFoundException, если файла нет
 
-        string boundary = "----MyFilesBoundary" + Guid.NewGuid().ToString("N");
-        string fileName = EscapeQuotes(Path.GetFileName(filePath));
+        string boundary = "MyFilesForm" + Guid.NewGuid().ToString("N");
         string field = EscapeQuotes(fieldName);
+        string fileName = EscapeQuotes(Path.GetFileName(filePath));
 
         var sb = new StringBuilder();
-        sb.Append("--").Append(boundary).Append("\r\n");
-        sb.Append("Content-Disposition: form-data; name=\"").Append(field)
-          .Append("; filename=\"").Append(fileName).Append("\"\r\n");
-        sb.Append("Content-Type: application/octet-stream\r\n\r\n");
-        _preamble = Encoding.UTF8.GetBytes(sb.ToString());
 
-        sb.Clear();
-        sb.Append("\r\n--").Append(boundary).Append("\r\n");
+        // Часть 1: dir (пустое значение = корневая папка).
+        sb.Append("--").Append(boundary).Append("\r\n");
         sb.Append("Content-Disposition: form-data; name=\"dir\"\r\n\r\n");
         sb.Append(dir).Append("\r\n");
-        sb.Append("--").Append(boundary).Append("--\r\n");
-        _epilogue = Encoding.UTF8.GetBytes(sb.ToString());
 
-        Headers.ContentType = new MediaTypeHeaderValue("multipart/form-data");
-        Headers.ContentType.Parameters.Add(new NameValueHeaderValue("boundary", boundary));
+        // Часть 2: файл.
+        sb.Append("--").Append(boundary).Append("\r\n");
+        sb.Append("Content-Disposition: form-data; name=\"").Append(field)
+          .Append("\"; filename=\"").Append(fileName).Append("\"\r\n");
+        sb.Append("Content-Type: application/octet-stream\r\n\r\n");
+
+        _preamble = Encoding.UTF8.GetBytes(sb.ToString());
+        _epilogue = Encoding.UTF8.GetBytes("\r\n--" + boundary + "--\r\n");
+
+        long total = _preamble.Length + _fileLength + _epilogue.Length;
+
+        string contentType = "multipart/form-data; boundary=" + boundary;
+        Headers.TryAddWithoutValidation("Content-Type", contentType);
+        Headers.ContentLength = total; // никакого chunked
+
+        RequestPreview =
+            contentType + "\r\n" +
+            "Content-Length: " + total + "\r\n" +
+            "\r\n--- НАЧАЛО ТЕЛА (перед байтами файла) ---\r\n" + Visible(_preamble) +
+            "\r\n--- КОНЕЦ ТЕЛА (после байтов файла) ---\r\n" + Visible(_epilogue);
     }
 
     private static string EscapeQuotes(string value)
@@ -57,9 +69,12 @@ public sealed class StreamingMultipartContent : HttpContent
         return value.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "");
     }
 
-    // ВНИМАНИЕ: здесь именно protected override, НЕ protected internal override.
-    // HttpContent.TryComputeLength — protected internal в сборке System.Net.Http.dll.
-    // При переопределении из другой сборки модификатор обязан быть protected (иначе CS0507).
+    /// <summary>Показывает CRLF явно, чтобы в диагностике было видно реальное обрамление.</summary>
+    private static string Visible(byte[] data)
+    {
+        return Encoding.UTF8.GetString(data).Replace("\r\n", "\\r\\n\r\n");
+    }
+
     protected override bool TryComputeLength(out long length)
     {
         length = _preamble.Length + _fileLength + _epilogue.Length;
