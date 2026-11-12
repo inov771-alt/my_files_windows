@@ -1,4 +1,4 @@
-﻿namespace MyFiles.Upload;
+namespace MyFiles.Upload;
 
 public enum UploadState
 {
@@ -18,6 +18,12 @@ public sealed class UploadItem
     public long Sent { get; set; }
     public UploadState State { get; set; } = UploadState.Waiting;
     public string? Error { get; set; }
+
+    // Диагностика: на каком этапе и почему произошёл сбой.
+    public string Stage { get; set; } = "";
+    public int? StatusCode { get; set; }
+    public string ResponseBody { get; set; } = "";
+    public string ExceptionText { get; set; } = "";
 
     public int Percent
     {
