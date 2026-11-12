@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
@@ -57,7 +57,10 @@ public sealed class StreamingMultipartContent : HttpContent
         return value.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "");
     }
 
-    protected internal override bool TryComputeLength(out long length)
+    // ВНИМАНИЕ: здесь именно protected override, НЕ protected internal override.
+    // HttpContent.TryComputeLength — protected internal в сборке System.Net.Http.dll.
+    // При переопределении из другой сборки модификатор обязан быть protected (иначе CS0507).
+    protected override bool TryComputeLength(out long length)
     {
         length = _preamble.Length + _fileLength + _epilogue.Length;
         return true;
