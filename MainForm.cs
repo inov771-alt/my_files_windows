@@ -29,7 +29,7 @@ internal sealed class MainForm : Form
     private readonly ProgressBar _overallBar = new() { Dock = DockStyle.Fill, Minimum = 0, Maximum = 1000, Height = 18, Margin = new Padding(3, 6, 3, 2) };
     private readonly Label _lblTotal = new() { AutoSize = true, Margin = new Padding(3, 0, 3, 0), Text = "" };
     private readonly Label _lblStatus = new() { AutoSize = true, Margin = new Padding(3, 2, 3, 0), Text = "Добавьте файлы и нажмите «Загрузить»." };
-    private readonly Label _lblHint = new() { AutoSize = true, ForeColor = Color.Gray, Font = new Font("Segoe UI", 8.25f), Margin = new Padding(3, 2, 3, 0), Text = "Файлы можно перетаскивать в список. Выберите строку — ниже появится полная диагностика (этап, HTTP, ответ сервера, исключение)." };
+    private readonly Label _lblHint = new() { AutoSize = true, ForeColor = Color.Gray, Font = new Font("Segoe UI", 8.25f), Margin = new Padding(3, 2, 3, 0), Text = "Файлы можно перетаскивать в список. Выберите строку — ниже появится полная диагностика (этап, запрос, HTTP, ответ сервера, исключение)." };
     private readonly Button _btnUpload = new() { Text = "Загрузить", Width = 130, Height = 32 };
     private readonly Button _btnCancel = new() { Text = "Отмена", Width = 110, Height = 32, Enabled = false };
 
@@ -107,6 +107,7 @@ internal sealed class MainForm : Form
 
     // ---------- Добавление файлов ----------
 
+    /// <summary>Добавляет файлы (папки раскрываются, без подпапок). Возвращает число добавленных файлов.</summary>
     public int AddPaths(IEnumerable<string> paths)
     {
         var existing = new HashSet<string>(_items.Select(i => i.FullPath), StringComparer.OrdinalIgnoreCase);
@@ -157,6 +158,7 @@ internal sealed class MainForm : Form
         _autoStart = true;
     }
 
+    /// <summary>Файлы от повторного запуска программы (Проводник мог разбить выборку на несколько запусков).</summary>
     public void OnExternalArgs(string[] args)
     {
         if (WindowState == FormWindowState.Minimized) { WindowState = FormWindowState.Normal; }
@@ -222,6 +224,7 @@ internal sealed class MainForm : Form
     {
         if (_uploading || !HasPending()) { return; }
 
+        // Повторная попытка для ошибок и отменённых; «Готово» пропускается.
         foreach (UploadItem item in _items)
         {
             if (item.State is UploadState.Error or UploadState.Cancelled)
@@ -232,6 +235,7 @@ internal sealed class MainForm : Form
                 item.StatusCode = null;
                 item.ResponseBody = "";
                 item.ExceptionText = "";
+                item.RequestInfo = "";
                 item.Stage = "";
                 UpdateRow(item);
             }
@@ -278,6 +282,7 @@ internal sealed class MainForm : Form
                     item.StatusCode = result.StatusCode;
                     item.ResponseBody = result.ResponseBody;
                     item.ExceptionText = result.ExceptionText;
+                    item.RequestInfo = result.RequestInfo;
                     item.Stage = result.Stage;
                     if (result.Success)
                     {
@@ -389,6 +394,9 @@ internal sealed class MainForm : Form
         sb.AppendLine("Статус:     " + StateText(item.State));
         sb.AppendLine("HTTP код:   " + (item.StatusCode.HasValue ? item.StatusCode.Value.ToString() : "—"));
         sb.AppendLine();
+        sb.AppendLine("===== ЗАПРОС (заголовки и обрамление тела) =====");
+        sb.AppendLine(item.RequestInfo.Length > 0 ? item.RequestInfo : "(нет)");
+        sb.AppendLine();
         sb.AppendLine("===== ТЕЛО ОТВЕТА СЕРВЕРА =====");
         sb.AppendLine(item.ResponseBody.Length > 0 ? item.ResponseBody : "(пусто)");
         sb.AppendLine();
@@ -474,7 +482,7 @@ internal sealed class MainForm : Form
         _lv.Columns[0].Width = Math.Max(160, _lv.ClientSize.Width - other - 4);
     }
 
-        private void LvDrawSubItem(object? sender, DrawListViewSubItemEventArgs e)
+    private void LvDrawSubItem(object? sender, DrawListViewSubItemEventArgs e)
     {
         // e.Item в .NET 8 объявлен как ListViewItem? — обязательна проверка на null.
         ListViewItem? row = e.Item;
